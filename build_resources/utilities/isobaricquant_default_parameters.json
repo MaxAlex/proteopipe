@@ -1,0 +1,28 @@
+{
+    "generateFragmentIonsFile": true,
+    "ms2NoiseWindowTolerance": 1,
+    "searchFragmentWIndowTolerance": 1.5,
+    "isoMethod": "TMTpro",
+    "confLabels": "all",
+    "PPMTolerance": 20,
+    "MS1PPMTolerance": 20,
+    "MS2PPMTolerance": 20,
+    "massType": "HCD_FRAGMENTATION",
+    "scanLevel": 2,
+    "scoreType": "ISOTOPE_DISTRIBUTION",
+    "ms1PrecWindowDaltons": 0.35,
+    "neutralLossesFI": "63.98,18.01,17.03",
+    "neutralLosses": "63.98,18.01,17.03",
+    "topXNum": 10,
+    "ms1DepthSearch": 5,
+    "recalcIntensities": false,
+    "dataSheetName": "TMT11_TL277832",
+    "modifications": {
+        "varMods": "15.9949146202 M 42.01056468472 n",
+        "consMods": "pep_n 304.2071453165, C 57.02146372118, K 304.2071453165",
+        "varTermParams": ""
+    },
+    "mzFilePath": "",
+    "hitImpurity": "master_scan",
+    "searchMethod": "most_intense"
+}

@@ -1,0 +1,48 @@
+#!/bin/bash
+
+set -e
+
+# Ensure that docker is logged into the AWS ECR
+aws ecr get-login-password --region {AWS_REGION} | docker login --username AWS --password-stdin {ECR_URL}.{AWS_REGION}.amazonaws.com &&
+
+# Comet
+docker build -t comet_image -f comet.Dockerfile . &&
+docker tag comet_image {ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:comet_image &&
+docker push {ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:comet_image
+
+# Reconcile
+docker build -t reconcile_image -f reconcile.Dockerfile . &&
+docker tag reconcile_image {ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:reconcile_image &&
+docker push {ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:reconcile_image
+
+# Annotate
+docker build -t annotate_image -f annotate.Dockerfile . &&
+docker tag annotate_image {ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:annotate_image &&
+docker push {ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:annotate_image
+
+# Postprocess
+docker build -t postprocess_image -f postprocess.Dockerfile . &&
+docker tag postprocess_image {ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:postprocess_image &&
+docker push {ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:postprocess_image
+
+# Sage
+pushd sage_container
+docker build -t pipe-sage . &&
+docker tag postprocess_image {ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:postprocess_image &&
+docker push {ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:postprocess_image
+popd
+
+# Java (Dinosaur)
+pushd java_components
+docker build -t java_components . &&
+docker tag java_components {ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:java_components &&
+docker push {ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:java_components
+popd
+
+# Proteowizard 
+pushd proteowizard
+docker build -t pwiz . &&
+docker tag proteowizard {ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:pwiz &&
+docker push {ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:pwiz
+popd
+

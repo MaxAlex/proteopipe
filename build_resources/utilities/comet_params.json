@@ -1,0 +1,6 @@
+{"add_K_lysine":"229.1629",
+ "add_Nterm_peptide":"229.1629",
+ "peptide_mass_tolerance": "20",
+ "peptide_mass_units":"2",
+ "fragment_bin_tol": "0.02",
+ "isotope_error": "3"}

@@ -1,0 +1,61 @@
+plugins {
+    id 'nf-amazon'
+}
+
+process {
+    withLabel: mainImage {
+        executor = 'awsbatch'
+	      queue = '{BATCH_QUEUE_NAME}'
+        container = '{ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:proteo_pipe_image'
+        containerOptions = '--ulimit nofile=1280:2560 --ulimit nproc=16:32'
+    }
+    
+    withLabel: proteoWizard {
+        executor = 'awsbatch'
+        queue = '{BATCH_QUEUE_NAME}'
+        container = '{ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:pwiz'
+        containerOptions = '--ulimit nofile=1280:2560 --ulimit nproc=16:32'
+    }
+    withLabel: sageSearch { 
+        executor = 'awsbatch'
+        queue = '{BATCH_QUEUE_NAME}'
+        container = '{ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:pipe_sage'
+        containerOptions = '--ulimit nofile=1280:2560 --ulimit nproc=16:32'
+    }
+    withLabel: javaImage {
+        executor = 'awsbatch'
+        queue = '{BATCH_QUEUE_NAME}'
+        container = '{ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:java_components'
+        containerOptions = '--ulimit nofile=1280:2560 --ulimit nproc=16:32  --priviledged'
+    }
+    withLabel: cometImage {
+        executor = 'awsbatch'
+        queue = '{BATCH_QUEUE_NAME}'
+        container = '{ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:comet_image'
+        containerOptions = '--ulimit nofile=1280:2560 --ulimit nproc=16:32'
+    }
+    withLabel: reconcileImage{
+        executor = 'awsbatch'
+        queue = '{BATCH_QUEUE_NAME}'
+        container = '{ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:reconcile_image'
+        containerOptions = '--ulimit nofile=1280:2560 --ulimit nproc=16:32'
+    }
+    withLabel: annotateImage{
+        executor = 'awsbatch'
+        queue = '{BATCH_QUEUE_NAME}'
+        container = '{ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:annotate_image'
+        containerOptions = '--ulimit nofile=1280:2560 --ulimit nproc=16:32'
+    }
+    withLabel: postprocessImage{
+        executor = 'awsbatch'
+        queue = '{BATCH_QUEUE_NAME}'
+        container = '{ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:postprocess_image'
+        containerOptions = '--ulimit nofile=1280:2560 --ulimit nproc=16:32'
+    }
+}
+
+aws {
+    accessKey = '{AWS_ACCESS_KEY}'
+    secretKey = '{AWS_SECRET_KEY}'
+    region = '{AWS_REGION}'
+}
