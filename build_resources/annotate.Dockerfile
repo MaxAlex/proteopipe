@@ -23,16 +23,13 @@ RUN python -m pip install pyteomics
 
 RUN rm -rf /var/lib/apt/lists/* /tmp/*
 
-# COPY multiplierz-2.2.1-py3-none-any.whl /
-# RUN python -m pip install multiplierz-2.2.1-py3-none-any.whl
 RUN git clone https://github.com/BlaisProteomics/multiplierz.git --branch patches
 RUN python -m pip install -e multiplierz
 
-COPY peptdeep-1.0.2-py3-none-any.whl /
-RUN python -m pip install peptdeep-1.0.2-py3-none-any.whl
+RUN python -m pip install peptdeep
 
-COPY peptdeep_generic_models.tar.gz /
-RUN tar -xvf peptdeep_generic_models.tar.gz
+# COPY peptdeep_generic_models.tar.gz /
+# RUN tar -xvf peptdeep_generic_models.tar.gz
 RUN python -c "from peptdeep.model.ms2 import pDeepModel"  # Causes models to be downloaded, if they weren't
 
 RUN python -m pip install mokapot==0.9.1 intervaltree

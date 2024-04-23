@@ -16,6 +16,13 @@ def concatenate_psm_files(psm_files, exp_name=None, outputfile=None):
         agg.append(psm)
     
     full = pd.concat(agg)
+
+    # bar.dtypes[bar.dtypes=='object'].index
+    # Have to ensure there's no tabs in any text field, otherwise mokapot's
+    # homespun parser will barf.
+    for col in full.dtypes[full.dtypes=='object'].index:
+        full[col] = full[col].apply(lambda x: x.replace('\t', ' '))
+
     if outputfile is None:
         outputfile = os.path.join(os.path.dirname(psm_files[0]), 'concatenated.pin')
     full.to_csv(outputfile, index=False, sep='\t')
@@ -25,13 +32,13 @@ def concatenate_psm_files(psm_files, exp_name=None, outputfile=None):
 
 
 
-def excerpt_columns_for_mokapot(psm_file, outputfile=None):
-    psm = pd.read_csv(psm_file, sep='\t')
-    psm = psm[['scan', 'peptide', 'charge', 'mz', 'retention_time', 'protein', 'decoy', 'percolator_score']]
-    if outputfile is None:
-        outputfile = os.path.join(os.path.dirname(psm_file), 'mokapot_input.txt')
-    psm.to_csv(outputfile, index=False, sep='\t')
-    return outputfile
+# def excerpt_columns_for_mokapot(psm_file, outputfile=None):
+#     psm = pd.read_csv(psm_file, sep='\t')
+#     psm = psm[['scan', 'peptide', 'charge', 'mz', 'retention_time', 'protein', 'decoy', 'percolator_score']]
+#     if outputfile is None:
+#         outputfile = os.path.join(os.path.dirname(psm_file), 'mokapot_input.txt')
+#     psm.to_csv(outputfile, index=False, sep='\t')
+#     return outputfile
 
 def run_mokapot(pin_file, output_stem=None):
     print("Running mokapot")

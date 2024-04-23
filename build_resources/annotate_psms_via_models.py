@@ -1,20 +1,22 @@
-import os
+import os, sys
 from collections import defaultdict
 import intervaltree as itree
-from multiplierz.mzAPI import mzFile
-from multiplierz.mass_biochem import fragment
-from multiplierz.internalAlgorithms import ProxSeq, PPM_bounds, assign_multiprocess
-from multiplierz.mzTools.isoDist import forPeptide
-from multiplierz.spectral_process import peak_pick
-from multiplierz.mgf import extract
 import pandas as pd
 import numpy as np
-import re
 from mod_mass import identify_mod_by_mass
 
 from deeplc import DeepLC
 
 from peptdeep.model.ms2 import pDeepModel 
+
+
+sys.path += '/'
+from multiplierz.mzAPI import mzFile
+from multiplierz.mass_biochem import fragment
+from multiplierz.internalAlgorithms import ProxSeq, PPM_bounds, assign_multiprocess
+from multiplierz.mzTools.isoDist import forPeptide
+from multiplierz.spectral_process import peak_pick
+
 
 try:
     PEPTDEEP_MODEL_PATH = '/data/models/peptdeep/generic/ms2.pth'
@@ -24,10 +26,6 @@ except AssertionError:
     assert(os.path.exists(PEPTDEEP_MODEL_PATH))
 
 
-
-def PPM_bounds(ppm, mass):
-    val = (mass/1000000.0)*ppm
-    return mass - val, mass + val
 
 def annotate_with_feature_info(psms, featurefile, ppm_tol=20):
     features = pd.read_csv(featurefile, sep='\t')
@@ -98,38 +96,56 @@ def annotate_with_feature_info(psms, featurefile, ppm_tol=20):
     assert(not any(new_psms.index.isnull()))
     return new_psms
 
-def get_rt_pred_deltas(psms):
+
+# This is extremely ad hoc; will eventually be replaced when parameter file autogeneration is built out (TODO)
+MASS_TO_MOD = {
+        229: 'TMT6plex', # Or 10, 11, etc.
+        304: 'TMTpro',
+        42: 'Acetyl',
+        15: 'Oxidation',
+        57: 'Carbamidomethyl',
+        79: 'Phospho',
+        }
+
+# TODO it seems like deepLC silently throws away 0-indexed mods????? WTF?
+def get_rt_pred_deltas(psms, calibration_size = 9000):
+        
     def render_deeplc_mod(mod):
         if mod=='-' or pd.isnull(mod):
             return ''
         else:
-            agg = []
-            for thing in mod.split(','):
-                a, c = thing.split('_')
-                agg.append(a+'|'+c)
+            # agg = []
+            # for thing in mod.split(','):
+            #     a, c = thing.split('_')
+            #     agg.append(a+'|'+c)
+            loc_mods = [x.split('_') for x in mod.split(',')]
 
             # DeepLC's call into psm_utils to format the peptides will barf specifically on 
             # multiple N-term mods, so this just removes one. To be slightly less hacky, 
             # remove the smaller one, which is likely to make less (?) of a difference
             # to the elution.
-            if len([x for x in agg if x[0]=='0']) > 1:
-                zero_mod = sorted([x for x in agg if x[0]=='0'], key=lambda x: float(x.split('|')[1]))[0]
-                agg.remove(zero_mod)
+            if len([x for x in loc_mods if int(x[0])==0]) > 1:
+                extra_zero_mods = sorted([x for x in loc_mods if int(x[0])==0], key=lambda x: float(x[1]))[:-1]
+                loc_mods = [x for x in loc_mods if x not in extra_zero_mods]
+            loc_mods = [(loc if int(loc) else '1', mod) for loc, mod in loc_mods]
 
-            return '|'.join(agg)
-        
+            loc_mods = [(loc, MASS_TO_MOD[int(float(mod))]) for loc, mod in loc_mods]
+
+            return '|'.join(['%s|%s' % (a, c) for a, c in loc_mods])
+
     psms['deeplc_mods'] = psms.rec_mods.apply(render_deeplc_mod)
     
-    conf_hit_count = min([len(psms[psms.proteins.apply(lambda x: 'rev_' not in str(x))])/2, 2000])
+    # conf_hit_count = min([len(psms[psms['label']>0])/2, calibration_size])
     
     ## This is probably the right way to do it, roughly, but I was sorting in the wrong direction?
     # conf_hit_txt = psms[psms.proteins.apply(lambda x: 'rev_' not in str(x))].sort_values('e-value').iloc[:conf_hit_count]
     ## Well, can at least insert a shuffle, which is probably also the right way to do it.
-    conf_hit_txt = psms[psms.proteins.apply(lambda x: 'rev_' not in str(x)) & (~psms.feature_RT_apex.isnull())].sample(frac=1).iloc[:conf_hit_count]
+    # sample(frac=1)
+    conf_psms = psms[(psms.label > 0) & (~psms.feature_RT_apex.isnull()) & (psms.in_both > 0)]
+    calibration_size = int(min([len(conf_psms)/2, calibration_size]))
+    conf_hit_txt = conf_psms.sample(n=calibration_size)
 
-    deeplc_calib = pd.DataFrame({'seq': conf_hit_txt.peptide,
-                                 'modifications': conf_hit_txt.deeplc_mods,
-                                 'tr': conf_hit_txt.feature_RT_apex})
+    deeplc_calib = pd.DataFrame({'seq': conf_hit_txt.peptide, 'modifications': conf_hit_txt.deeplc_mods, 'tr': conf_hit_txt.feature_RT_apex})
     deeplc_target = pd.DataFrame({'seq': psms.peptide,
                                  'modifications': psms.deeplc_mods})
 
@@ -139,157 +155,115 @@ def get_rt_pred_deltas(psms):
     deeplc_preds = dlc.make_preds(seq_df=deeplc_target)
 
     psms['rt_pred'] = deeplc_preds
-    psms['rt_error'] = psms['feature_RT_apex'] - psms['rt_pred']
-    psms[psms.feature_RT_apex.isnull()]['rt_error'] = psms['rt'] - psms['rt_pred']
+    # psms['rt_error'] = psms['feature_RT_apex'] - psms['rt_pred']
+    # psms[psms.feature_RT_apex.isnull()]['rt_error'] = psms[psms.feature_RT_apex.isnull()]['rt'] - psms[psms.feature_RT_apex.isnull()]['rt_pred']
+    psms['rt_error'] = psms.apply(axis=1, func=lambda x: x['rt'] - x['rt_pred'] if pd.isnull(x['feature_RT_apex']) else x['feature_RT_apex'] - x['rt_pred'])
     psms['abs_rt_error'] = psms.rt_error.abs()
 
-    assert(psms['abs_rt_error'].any())
+    assert(not any(psms['abs_rt_error'].isna()))
 
-    psms = psms.drop('deeplc_mods', axis=1)
-
-    return psms 
+    return psms[['rt', 'rt_error', 'abs_rt_error']]
 
 
-def calculate_fragment_error(data, pred_lookup, ppm_tol=200):
 
-    def get_fragmentation_error(txt_item):
-        seq = txt_item['peptide']
-        nice_mods = txt_item['alphapept_mods']
-        mods = txt_item['rec_mods']
-        charge = txt_item['charge']
-        scannum = txt_item['scannr']
+def calculate_fragment_error(data, pred_lookup, txt_item, ppm_tol=200):
+    seq = txt_item['peptide']
+    nice_mods = txt_item['alphapept_mods']
+    mods = txt_item['rec_mods']
+    charge = txt_item['charge']
+    scannum = txt_item['scannr']
 
-        scan = ProxSeq(data.scan(scannum, centroid=True), lambda x: x[0])
+    scan = ProxSeq(data.scan(scannum, centroid=True), lambda x: x[0])
 
-        pred_info = pred_lookup[seq, mods if mods!='' else np.nan, charge]
-        frags = fragment(seq, nice_mods, charges=[1,2])
-        value_pairs = []
-        for _, row in pred_info.iterrows():
-            b_i = row['cleave_ind']
-            y_i = len(seq)-(b_i)
+    pred_info = pred_lookup[seq, mods if mods!='' else np.nan, charge]
+    frags = fragment(seq, nice_mods, charges=[1,2])
+    value_pairs = []
+    for _, row in pred_info.iterrows():
+        b_i = row['cleave_ind']
+        y_i = len(seq)-(b_i)
 
-            b_obs = sum([x[1] for x in scan.returnRange(*PPM_bounds(ppm_tol, frags['b'][b_i]))])
-            y_obs = sum([x[1] for x in scan.returnRange(*PPM_bounds(ppm_tol, frags['y'][y_i]))])
-            bpp_obs = sum([x[1] for x in scan.returnRange(*PPM_bounds(ppm_tol, frags['b++'][b_i]))])
-            ypp_obs = sum([x[1] for x in scan.returnRange(*PPM_bounds(ppm_tol, frags['y++'][y_i]))])
-        
-            # TODO mod loss values?
-            value_pairs += [(b_obs, row['b_z1'], 'b%d' % b_i),
-                            (y_obs, row['y_z1'], 'y%d' % y_i),
-                            (bpp_obs, row['b_z2'], 'b++%d' % b_i),
-                            (ypp_obs, row['y_z2'], 'y++%d' % y_i)]
-            
-        # validvals = [x for x in value_pairs if x[0] and x[1]]
-        # median_scale = np.median([x[1]/x[2] for x in validvals])
-        valid_obs_sum = sum([x[0] for x in value_pairs if x[1]])
-        if not valid_obs_sum:
-            return 1.5, 1.5
-        else:
-            scaled_pairs = [(x[0]/valid_obs_sum, x[1], x[2]) for x in value_pairs]
-
-            # Square the errors?
-            exc_err = sum([abs(x[0]-x[1]) for x in scaled_pairs if x[0] and x[1]]) / len([x[0] for x in value_pairs if x[0] and x[1]])
-            inc_err = sum([abs(x[0]-x[1]) for x in scaled_pairs]) / len(scaled_pairs)
-
-            return exc_err, inc_err
+        b_obs = sum([x[1] for x in scan.returnRange(*PPM_bounds(ppm_tol, frags['b'][b_i]))])
+        y_obs = sum([x[1] for x in scan.returnRange(*PPM_bounds(ppm_tol, frags['y'][y_i]))])
+        bpp_obs = sum([x[1] for x in scan.returnRange(*PPM_bounds(ppm_tol, frags['b++'][b_i]))])
+        ypp_obs = sum([x[1] for x in scan.returnRange(*PPM_bounds(ppm_tol, frags['y++'][y_i]))])
     
-    return get_fragmentation_error
-
-
-
-
-
-def pep_table(pep_list, nce, instrument, charges=[2,3,4]):
-    mods = []
-    mod_sites = []
-
-    # for item in pep_list:
-    #     modstr = item[2]
-    #     mod_parse = [re.match(r'^([A-Za-z-]+)(\d*): ([A-Za-z0-9-]+)$', x) for x in modstr.split('; ')]
-    #     mod_parse = [x.groups() if x is not None else (None, None, None) for x in mod_parse]
-
-    #     submods = []
-    #     submod_sites = []
-    #     for aa_loc, site, modname in mod_parse:
-    #         if (modname == 'Acetyl' or modname == 'TMT6plex') and site=='0':
-    #             aa_loc = 'Any N-term'
-
-    #         if modname is not None:
-    #             newmod = modname + '@' + aa_loc
-    #             assert('Acetyl@N' not in newmod)
-    #             submods.append(newmod)
-    #             submod_sites.append(site if site != '' else 0)
-    #     mods.append(';'.join(submods))
-    #     mod_sites.append(';'.join([str(x) for x in submod_sites]))
-
-    for item in pep_list:
-        peptide = item[0]
-        modstr = item[2]
-        if pd.isnull(modstr):
-            mods.append('')
-            mod_sites.append('')
-        else:
-            submods = []
-            submod_sites = []
-            for mod in modstr.split(','):
-                loc, mass = mod.split('_')
-                if loc=='0':
-                    site = 'Any N-term'
-                else:
-                    site = peptide[int(loc)-1]
-                modname = identify_mod_by_mass(float(mass))
-                if modname == 'Oxidation':
-                    assert(site=='M')
-                if modname == 'Acetyl':
-                    assert(site=='Any N-term')
-                submods.append(modname + '@' + site)
-                submod_sites.append(loc)
-            mods.append(';'.join(submods))
-            mod_sites.append(';'.join(submod_sites))
-
-    base_tab = pd.DataFrame({
-        'pep_name': [x[1] for x in pep_list],
-        'sequence': [x[0] for x in pep_list],
-        'mods': mods,
-        'mod_sites': mod_sites,
-        'fmt_mods': [x[2] for x in pep_list],
-        'nce': nce,
-        'instrument': instrument
-    })
-    if charges is None:
-        base_tab['charge'] = [x[3] for x in pep_list]
-        final_tab = base_tab
+        # TODO mod loss values?
+        value_pairs += [(b_obs, row['b_z1'], 'b%d' % b_i),
+                        (y_obs, row['y_z1'], 'y%d' % y_i),
+                        (bpp_obs, row['b_z2'], 'b++%d' % b_i),
+                        (ypp_obs, row['y_z2'], 'y++%d' % y_i)]
+        
+    # validvals = [x for x in value_pairs if x[0] and x[1]]
+    # median_scale = np.median([x[1]/x[2] for x in validvals])
+    valid_obs_sum = sum([x[0] for x in value_pairs if x[1]])
+    if not valid_obs_sum:
+        return 1.5, 1.5
     else:
-        charged_tabs = []
-        for charge in charges:
-            subtab = base_tab.copy()
-            subtab['charge'] = charge
-            charged_tabs.append(subtab)
-        final_tab = pd.concat(charged_tabs)
+        scaled_pairs = [(x[0]/valid_obs_sum, x[1], x[2]) for x in value_pairs]
 
-    return final_tab
+        # Square the errors?
+        exc_err = sum([abs(x[0]-x[1]) for x in scaled_pairs if x[0] and x[1]]) / len([x[0] for x in value_pairs if x[0] and x[1]])
+        inc_err = sum([abs(x[0]-x[1]) for x in scaled_pairs]) / len(scaled_pairs)
 
+        return exc_err, inc_err
+    
 
-def predict_for_specific(peptide_list, model, nce, instrument, batch_size=10000):
-    prediction_record = {}
-    for p_i in range(0, len(peptide_list), batch_size):
-        sub_list = peptide_list[p_i:p_i+batch_size]
-        pep_tab = pep_table(sub_list, nce=nce, instrument=instrument, charges=None)
-        pred_tab = model.predict(pep_tab)
+def calculate_fragment_error_better(data, pred_lookup, txt_item, ppm_tol=200):
+    seq = txt_item['peptide']
+    nice_mods = txt_item['alphapept_mods']
+    mods = txt_item['rec_mods']
+    charge = txt_item['charge']
+    scannum = txt_item['scannr']
 
-        for ind, row in pep_tab.iterrows():
-            pep_pred = pred_tab[pred_tab.pep_ind==ind]
-            prediction_record[row.sequence, row.fmt_mods, row.charge] = pep_pred
+    scan = ProxSeq(data.scan(scannum, centroid=True), lambda x: x[0])
 
-    return prediction_record
+    pred_info = pred_lookup[seq, mods if mods!='' else np.nan, charge]
 
+    # Redundant! But multiplierz only recognizes a very limited set of mod names.
+    frag_mods = []
+    for mod in mods.split(','):
+        loc, mass = mod.split('_')
+        frag_mods.append(f'{seq[int(loc)-1]}{loc}: {float(mass)}')
 
+    frags = fragment(seq.replace('U', 'S'), frag_mods, charges=[1,2])
 
+    obs_pred_pairs = []
+    for _, row in pred_info.iterrows():
+        index = int(row['cleave_ind']-1)
+
+        for ion in ['b', 'y']:
+            for charge_num, charge_plus in [('1', ''), ('2', '++')]:
+                pred_int = row[f'{ion}_z{charge_num}']
+
+                mz = frags[ion+charge_plus][index][1]
+                zone = scan.returnRange(*PPM_bounds(ppm_tol, mz))
+                try:
+                    obs_int = min(zone, key = lambda x: abs(x[1]-pred_int))[1]
+                except ValueError:
+                    obs_int = 0
+
+                diff = obs_int / pred_int
+                # obses.append((obs_int, len(zone)))
+                # diffs.append(diff)
+                obs_pred_pairs.append((obs_int, pred_int))
+
+    match_pairs = [x for x in obs_pred_pairs if x[0] and x[1]]
+    if not match_pairs:
+        return len([x for x in obs_pred_pairs if x[0] or x[1]]), 0
+    else:
+        # diffs = [x for x in diffs if x and not np.isnan(x)]
+
+        scale_factor = sum([x[0] for x in match_pairs]) / sum([x[1] for x in match_pairs])
+
+        diffs = [x[0] / (x[1]*scale_factor) for x in match_pairs]
+        # raise Exception
+        
+        return abs(np.mean(diffs)-1), len(diffs)
 
 
 # TODO: specific NCE and instrument setting?
-def get_frag_pred_deltas(psms, data, nce, instrument,
-                         model_path = PEPTDEEP_MODEL_PATH):
+def get_frag_pred_deltas(psms, data, nce, instrument, model_path = PEPTDEEP_MODEL_PATH,
+                         prediction_batch_size = 100000):
     def render_alphapept_mod(mod, pep):
         if mod=='-' or pd.isnull(mod):
             return ''
@@ -305,35 +279,101 @@ def get_frag_pred_deltas(psms, data, nce, instrument,
                 agg.append(('%s%s: %s' % (aa, loc, modname)))
             return '; '.join(agg)
 
+
+    def _deeppept_format_table(pep_list, charges=[2,3,4]):
+        mods = []
+        mod_sites = []
+
+        for item in pep_list:
+            peptide = item[0]
+            modstr = item[2]
+            if pd.isnull(modstr):
+                mods.append('')
+                mod_sites.append('')
+            else:
+                submods = []
+                submod_sites = []
+                for mod in modstr.split(','):
+                    loc, mass = mod.split('_')
+                    if loc=='0':
+                        site = 'Any N-term'
+                    else:
+                        site = peptide[int(loc)-1]
+                    modname = identify_mod_by_mass(float(mass))
+                    if modname == 'Oxidation':
+                        assert(site=='M')
+                    if modname == 'Acetyl':
+                        assert(site=='Any N-term')
+                    submods.append(modname + '@' + site)
+                    submod_sites.append(loc)
+                mods.append(';'.join(submods))
+                mod_sites.append(';'.join(submod_sites))
+
+        base_tab = pd.DataFrame({
+            'pep_name': [x[1] for x in pep_list],
+            'sequence': [x[0] for x in pep_list],
+            'mods': mods,
+            'mod_sites': mod_sites,
+            'fmt_mods': [x[2] for x in pep_list],
+            'nce': nce,
+            'instrument': instrument
+        })
+        if charges is None:
+            base_tab['charge'] = [x[3] for x in pep_list]
+            final_tab = base_tab
+        else:
+            charged_tabs = []
+            for charge in charges:
+                subtab = base_tab.copy()
+                subtab['charge'] = charge
+                charged_tabs.append(subtab)
+            final_tab = pd.concat(charged_tabs)
+
+        return final_tab
+
+
+    def _predict_for_specific(peptide_list, model):
+        prediction_record = {}
+        for p_i in range(0, len(peptide_list), prediction_batch_size):
+            sub_list = peptide_list[p_i:p_i+prediction_batch_size]
+            pep_tab = _deeppept_format_table(sub_list, charges=None)
+            pred_tab = model.predict(pep_tab)
+
+            for ind, row in pep_tab.iterrows():
+                pep_pred = pred_tab[pred_tab.pep_ind==ind]
+                prediction_record[row.sequence, row.fmt_mods, row.charge] = pep_pred
+
+        return prediction_record
+
     fragmodel = pDeepModel(device='gpu')
     assert(os.path.exists(model_path))
-    fragmodel.load(model_path)
+    fragmodel.load(model_path) # type: ignore
 
     psms['alphapept_mods'] = psms.apply(axis=1,
                                        func=lambda x: render_alphapept_mod(x['rec_mods'], 
                                                                            x['peptide']))
     psms['name_placeholder'] = list(psms.index)
 
-    # sub_psms_agg = []
-    # for rawfile in rawfiles:
-    #     file_psms = psms[psms['source_file'].apply(lambda x: os.path.basename(rawfile.split('.')[0])==x)]
-    #     assert(len(file_psms))
-
     # This could be un-rolled (re-rolled?) so that it only calculates the prediction for each peptide
     # once across all files
     peptide_list = list(psms[['peptide', 'name_placeholder', 'rec_mods', 'charge']]
                         .itertuples(index=False, name=None))
-    preds = predict_for_specific(peptide_list, fragmodel, nce=nce, instrument=instrument,
-                                batch_size=1000)
-    frag_error_calc = calculate_fragment_error(data, preds, ppm_tol=20)
-    frag_errors = psms.apply(axis=1, func=frag_error_calc)
-    psms['exc_frag_error'] = [x[0] for x in frag_errors]
-    psms['inc_frag_error'] = [x[1] for x in frag_errors]
-
-    return psms 
+    preds = _predict_for_specific(peptide_list, fragmodel)
+    frag_errors = psms.apply(axis=1, func=lambda x: calculate_fragment_error_better(data, preds, x, ppm_tol=20))
+    psms['frag_error'] = [x[0] for x in frag_errors]
+    psms['matched_frags'] = [x[1] for x in frag_errors]
 
 
-def get_precursor_envelope_ratios(data):
+    return psms[['frag_error', 'matched_frags']]
+
+
+def get_isotopic_envelope_delta(psms, data):
+
+    def _expected_ratio_for_peptide(peptide):
+        ratios = forPeptide(peptide.replace('U', 'S'))
+        return ratios[0]/ratios[1]
+
+
     ms2s_for_ms1 = {}
     agg = []
     for info in data.scan_info():
@@ -348,7 +388,7 @@ def get_precursor_envelope_ratios(data):
     for ms1, ms2s in ms2s_for_ms1.items():
         if ms2s:
             ms1scan = data.scan(ms1, centroid=True)
-            envelopes, etc = peak_pick(ms1scan)  # type: ignore
+            envelopes, _ = peak_pick(ms1scan)  # type: ignore
             for _, mz, num, _, _ in ms2s:
                 exp_chg = data.extra_info(num)['Charge State']
                 try:
@@ -360,57 +400,28 @@ def get_precursor_envelope_ratios(data):
                 except KeyError:
                     obs_ratio = np.nan
                 precursor_ratios.append((num, obs_ratio))
-    return precursor_ratios
-
-
-def get_isotopic_envelope_delta(psms, data):
-    def expected_ratio_for_peptide(peptide):
-        ratios = forPeptide(peptide)
-        return ratios[0]/ratios[1]
-
-    # percursor_iso_by_scan = {}
-    # for rawfile in rawfiles:
-    #     filename = os.path.basename(rawfile)#.split('.')[0]
-    #     rats = get_precursor_envelope_ratios(rawfile)
-    #     percursor_iso_by_scan.update([((filename, num), ratio) for num, ratio in rats])
-    percursor_iso_by_scan = dict(get_precursor_envelope_ratios(data))
+    precursor_iso_by_scan = dict(precursor_ratios)
 
     psms['expected_isotope_ratio'] = psms.apply(axis=1,
-                                               func=lambda x: expected_ratio_for_peptide(x['peptide']))
-    psms['observed_isotope_ratio'] = psms.apply(axis=1, func=lambda x: percursor_iso_by_scan.get(x['scannr'], 1))
+                                               func=lambda x: _expected_ratio_for_peptide(x['peptide']))
+    psms['observed_isotope_ratio'] = psms.apply(axis=1, func=lambda x: precursor_iso_by_scan.get(x['scannr'], 1))
     psms['isotope_ratio_error'] = abs(np.log(psms['observed_isotope_ratio']) -
                                       np.log(psms['expected_isotope_ratio']))
 
     # Replace nan with median
     psms['isotope_ratio_error'] = psms['isotope_ratio_error'].fillna(psms['isotope_ratio_error'].median())
 
-    psms = psms.drop(['expected_isotope_ratio', 'observed_isotope_ratio'], axis=1)
-
-    return psms 
+    return psms['isotope_ratio_error']
 
 
-
-def merge_features(*tables, merge_on = ['label', 'filename', 'scannr', 'expmass', 'calcmass', 'peptide', 'rec_mods', 'proteins',
-                          'comet_rank', 'sage_rank', 'in_both',
-                          'charge', 'num_proteins', 'peptide_len', 'missed_cleavages',
-                          'delta_mass', 'abs_delta_mass']):
-    merged = tables[0]
-    for table in tables[1:]:
-        merged = merged.merge(table, on=merge_on, how='inner')
-    
-    assert(all(len(merged)==len(x) for x in tables))
-    # assert(set(merged.columns) == set(sum([x[1] for x in feature_files], [])+merge_on))
-
-    return merged
-
-
-def annotate_pin_file(psmfile, rawfile, featurefile, annotated_psmfile=None, coll_e = 32, instrument_name = 'Elite'):
-    print("Annotating %s" % psmfile)
-
-    data = mzFile(rawfile)
-
+def annotate_pin_file(psmfile, rawfile, featurefile, outputfile, coll_e = 32, instrument_name = 'Elite'):
+    data = mzFile(rawfile) 
     psms = pd.read_csv(psmfile)
-    # Neither comet now sage give us the actual MZ! Very impolite
+
+    # print("TEST MODE")
+    # psms = psms.iloc[:100]
+
+     # TODO replace this with numbers from the TMT file?
     mz_rt_lookup = {x[2]:(x[0], x[1]) for x in data.scan_info()} # type: ignore
     # psms[['rt', 'mz']] = psms.scannr.apply(lambda x: mz_rt_lookup[x])
     psms['rt'] = psms.scannr.apply(lambda x: mz_rt_lookup[x][0])
@@ -418,41 +429,28 @@ def annotate_pin_file(psmfile, rawfile, featurefile, annotated_psmfile=None, col
 
     psms = annotate_with_feature_info(psms, featurefile)
 
-    rt_psms = get_rt_pred_deltas(psms.copy())
-    frag_psms = get_frag_pred_deltas(psms.copy(), data, nce=coll_e, instrument=instrument_name)
-    iso_psms = get_isotopic_envelope_delta(psms.copy(), data)
-    print("Model running done.")
-    
-    merged_psms = merge_features(frag_psms, rt_psms, iso_psms)
-    merged_psms = merged_psms[['label', 'filename', 'scannr', 'expmass', 'calcmass', 'mz', 'rec_mods', 
-                               'comet_rank', 'sage_rank', 'in_both', 'wide_rank',
-                               'charge', 'num_proteins', 'peptide_len', 'missed_cleavages',
-                               'delta_mass', 'abs_delta_mass', 
-                               'isotope_ratio_error', 'rt', 'rt_error', 'abs_rt_error', 'inc_frag_error', 'exc_frag_error',
-                               'hyperscore', 'hyperscore_imputed', 'hyperscore_type', 
-                               'chg_is_1', 'chg_is_2', 'chg_is_3', 'chg_is_4', 'chg_is_5', 'chg_is_6',
-                               'peptide', 'proteins']]
+    # Basic imputation to make mokapot work better?  TODO check if taking median is better?
+    psms['feature_apex_int'] = psms['feature_apex_int'].fillna(psms['feature_apex_int'].min())
+    psms['feature_total_int'] = psms['feature_total_int'].fillna(psms['feature_total_int'].min())
+    psms['feature_run_length'] = psms['feature_RT_end'] - psms['feature_RT_start']
+    psms['feature_run_length'] = psms['feature_run_length'].fillna(psms['feature_run_length'].min())
 
-    merged_psms['peptide'] = merged_psms.apply(axis=1, func=lambda x: x['peptide'] + (("___" + x['rec_mods']) if isinstance(x['rec_mods'], str) else '')) 
-    merged_psms = merged_psms.drop('rec_mods', axis=1)
+    # TODO multiprocessing/multithreading?
+    psms[['rt', 'rt_error', 'abs_rt_error']] = get_rt_pred_deltas(psms.copy())
+    psms[['fragment_error', 'matched_fragments']] = get_frag_pred_deltas(psms.copy(), data, nce=coll_e, instrument=instrument_name)
+    psms['isotope_ratio_error'] = get_isotopic_envelope_delta(psms.copy(), data)
 
-    
-    # Check for mz that come up as 0.0; these are invalid scans for some reason.
-    if (merged_psms.mz == 0.0).any():
-        print("Removing %d scans with invalid MZ" % (merged_psms.mz == 0.0).sum())
-        merged_psms = merged_psms[merged_psms.mz != 0.0]
+    psms.drop('rec_mods', axis = 1, inplace = True)
 
     # Rrebuild specid since mokapot will expect it.
-    merged_psms['specid'] = merged_psms.apply(axis=1, func=lambda x: '%s_%s' % (x['filename'], x['scannr']))
+    psms['specid'] = psms.apply(axis=1, func=lambda x: '%s_%s' % (x['filename'], x['scannr']))
 
-    if annotated_psmfile is None:
-        annotated_psmfile = psmfile.rsplit('.', 1)[0] + '.annotated.pin'
-    merged_psms.to_csv(annotated_psmfile, index=False, sep='\t')
-
+    psms.to_csv(outputfile, sep='\t', index=False)
     data.close()
-    
-    print("Done annotating %s" % annotated_psmfile)
-    return annotated_psmfile
+
+    print("Annotated PSMs written to %s" % outputfile)
+    return outputfile
+
 
 
 if __name__ == "__main__":
@@ -461,6 +459,9 @@ if __name__ == "__main__":
     parser.add_argument('pin')
     parser.add_argument('raw')
     parser.add_argument('features')
+    parser.add_argument('output')
+    parser.add_argument('--coll_e', default = 32)
+    parser.add_argument('--instrument_name', default = 'Elite')
     args = parser.parse_args()
 
-    annotate_pin_file(args.pin, args.raw, args.features)
+    annotate_pin_file(args.pin, args.raw, args.features, args.output)#, args.coll_e, args.instrument_name)

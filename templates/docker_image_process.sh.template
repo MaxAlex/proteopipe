@@ -25,18 +25,18 @@ docker build -t postprocess_image -f postprocess.Dockerfile . &&
 docker tag postprocess_image {ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:postprocess_image &&
 docker push {ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:postprocess_image
 
-# Sage
-pushd sage_container
-docker build -t pipe-sage . &&
-docker tag postprocess_image {ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:postprocess_image &&
-docker push {ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:postprocess_image
-popd
-
 # Java (Dinosaur)
 pushd java_components
 docker build -t java_components . &&
 docker tag java_components {ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:java_components &&
 docker push {ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:java_components
+popd
+
+# Sage
+pushd sage_container
+docker build -t pipe_sage . &&
+docker tag pipe_sage {ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:pipe_sage &&
+docker push {ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:pipe_sage
 popd
 
 # Proteowizard 

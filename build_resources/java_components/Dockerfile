@@ -6,8 +6,5 @@ RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2
 RUN unzip awscliv2.zip
 RUN ./aws/install
 
-RUN apt install -y python3 python3-pip
-RUN python3 -m pip install pandas
 
-COPY Dinosaur-1.2.1.free.jar /
-COPY IsobaricQuant_LINUX.jar /
+RUN curl "https://github.com/fickludd/dinosaur/releases/download/1.2.0/Dinosaur-1.2.0.free.jar" -o "Dinosaur-1.2.1.free.jar"
