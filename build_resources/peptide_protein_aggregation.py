@@ -45,7 +45,7 @@ def agg_psms_to_peptides(psm_file, mokapot_peptides, run_parse_regexp, norm_to_i
     if tmt_cols and norm_to_isochannel is None:
         norm_to_isochannel = tmt_cols[0]
     pep_rows = []
-    for pep_str, pep_psms in psms.groupby('Peptide_str'):
+    for pep_str, pep_psms in psms.groupby('ModifiedPeptide'):
         try:
             mok_pep = moka_pep.loc[pep_str] 
         except KeyError:
@@ -200,6 +200,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-p', '--psm', required=True)
     parser.add_argument('-m', '--mokapot', required=True)
+    parser.add_argument('--mokapot_prots', required=True)
     parser.add_argument('-r', '--run_parse_regexp', required=True)
     parser.add_argument('-n', '--norm_to_isochannel')
     args = parser.parse_args()

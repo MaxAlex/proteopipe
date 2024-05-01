@@ -4,6 +4,7 @@ import intervaltree as itree
 import pandas as pd
 import numpy as np
 from mod_mass import identify_mod_by_mass
+from resource_mon import start_monitor, stop_monitor 
 
 from deeplc import DeepLC
 
@@ -26,78 +27,7 @@ except AssertionError:
     assert(os.path.exists(PEPTDEEP_MODEL_PATH))
 
 
-
 def annotate_with_feature_info(psms, featurefile, ppm_tol=20):
-    features = pd.read_csv(featurefile, sep='\t')
-
-    # Subtle point - rt_intervals has to be a defaultdict, even though the keys are floats, because
-    # RT is based on MS1 time, and there's only so many MS1s, so collisiions become a big problem.
-    rt_intervals = defaultdict(list)
-    for ind, x in features.iterrows():
-        width = x['rtEnd'] - x['rtStart']  # type: ignore
-        rt_intervals[(x['rtStart'] - (width), x['rtEnd'])].append(ind)  # type: ignore
-    mz_intervals = {PPM_bounds(ppm_tol, x['mz']):ind for ind, x in features.iterrows()}
-    rt_tree = itree.IntervalTree([itree.Interval(*x) for x in rt_intervals.keys()])
-    mz_tree = itree.IntervalTree([itree.Interval(*x) for x in mz_intervals.keys()])
-
-    quant_rows = []
-    for ind, row in psms.iterrows():
-        mz = float(row['mz'])  # type: ignore
-        rt = float(row['rt'])
-        chg = int(row['charge'])  # type: ignore
-
-        rt_matches = set(sum((rt_intervals[tuple(x[:2])] for x in rt_tree[rt]), [])) # type: ignore
-        # The feature will always (should always) have the correct monoisotopic MZ listed, but the
-        # scan MZ may have been taken from a different isotopic peak. So we'll check for some reasonable
-        # number of peaks and take the first one that matches. 
-        match_data : pd.DataFrame = None #type: ignore
-        iso = None
-        for abs_iso in range(0, 7):
-            for iso in [-abs_iso, abs_iso]:
-                iso_mz = mz - (iso * 1.00335)/chg
-                mz_matches = {mz_intervals[tuple(x[:2])] for x in mz_tree[iso_mz]}
-                matches = rt_matches.intersection(mz_matches)
-    
-                match_data = features.iloc[list(matches)]
-                match_data = match_data[match_data.charge.apply(int)==int(chg)]
-                if len(match_data):
-                    break
-            if len(match_data):
-                break
-
-        if len(match_data) == 0:
-            quant_rows.append({'_psm_id': ind, 'feature_id': None, 'feature_RT_start': None,
-                               'feature_RT_end': None, 'feature_RT_apex': None,
-                               'feature_total_int': None, 'feature_apex_int': None,
-                               'feature_mz': None})
-        else:
-            best_match = match_data.iloc[(match_data['mz']-mz).argmin()]
-            quant_rows.append({'_psm_id': ind,
-                               'feature_id': best_match.name, 
-                               'feature_RT_start': best_match['rtStart'],
-                               'feature_RT_end': best_match['rtEnd'],
-                               'feature_RT_apex': best_match['rtApex'],
-                               'feature_total_int': best_match['intensitySum'],
-                               'feature_apex_int': best_match['intensityApex'],
-                               'feature_mz': best_match['mz'],
-                               })
-
-
-    quant = pd.DataFrame(quant_rows, columns = ['_psm_id', 'feature_id', 'feature_RT_start',
-                                                'feature_RT_end', 'feature_RT_apex',
-                                                'feature_total_int', 'feature_apex_int',
-                                                'feature_mz'])
-    assert(len(psms)==len(quant))
-    new_psms = psms.merge(quant, left_index=True, right_on='_psm_id', how='left')#.drop('_psm_id', axis=1)
-    assert(len(new_psms)==len(quant))
-    assert(len(psms)==len(new_psms))
-    #assert(not any(psms.feature_id.isnull()))
-    #assert(not any(psms.feature_apex_int.isnull()))
-    assert(not any(new_psms.index.isnull()))
-    return new_psms
-
-
-def new_annotate_with_feature_info(psms, featurefile, ppm_tol=20):
     all_features = pd.read_csv(featurefile, sep='\t')
 
     all_charge = all_features.charge.unique()
@@ -241,6 +171,22 @@ def get_rt_pred_deltas(psms, calibration_size = 9000):
     return psms[['rt', 'rt_error', 'abs_rt_error']]
 
 
+def get_cosine_distance(X_pts, Y_pts, vec_length=1500):
+    X = np.zeros(vec_length)
+    Y = np.zeros(vec_length)
+
+    for mz, i in sorted(X_pts, key = lambda x: x[1]):
+        if mz >= 1500: 
+            continue
+        X[int(mz)] = i
+    for mz, i in sorted(Y_pts, key = lambda x: x[1]):
+        if mz >= 1500: 
+            continue
+        Y[int(mz)] = i
+
+    return np.dot(X, Y) / (np.linalg.norm(X) * np.linalg.norm(Y))
+
+
 def calculate_fragment_error(data, pred_lookup, txt_item, ppm_tol=200):
     seq = txt_item['peptide']
     nice_mods = txt_item['alphapept_mods']
@@ -248,7 +194,8 @@ def calculate_fragment_error(data, pred_lookup, txt_item, ppm_tol=200):
     charge = txt_item['charge']
     scannum = txt_item['scannr']
 
-    scan = ProxSeq(data.scan(scannum, centroid=True), lambda x: x[0])
+    raw_scan = data.scan(scannum, centroid=True)
+    scan = ProxSeq(raw_scan, lambda x: x[0])
 
     pred_info = pred_lookup[seq, mods if mods!='' else np.nan, charge]
 
@@ -261,6 +208,7 @@ def calculate_fragment_error(data, pred_lookup, txt_item, ppm_tol=200):
     frags = fragment(seq.replace('U', 'S'), frag_mods, charges=[1,2])
 
     obs_pred_pairs = []
+    pred_scan = []
     for _, row in pred_info.iterrows():
         index = int(row['cleave_ind']-1)
 
@@ -275,20 +223,23 @@ def calculate_fragment_error(data, pred_lookup, txt_item, ppm_tol=200):
                 except ValueError:
                     obs_int = 0
 
-                # diff = obs_int / pred_int
-                # obses.append((obs_int, len(zone)))
-                # diffs.append(diff)
                 obs_pred_pairs.append((obs_int, pred_int))
+                pred_scan.append((mz, pred_int))
+
+    if any([x[1] for x in raw_scan]) and any([x[1] for x in pred_scan]):
+        cosine_dist = get_cosine_distance(raw_scan, pred_scan)
+    else:
+        cosine_dist = -0.5
 
     match_pairs = [x for x in obs_pred_pairs if x[0] and x[1]]
     if not match_pairs:
-        return len([x for x in obs_pred_pairs if x[0] or x[1]]), 0
+        return len([x for x in obs_pred_pairs if x[0] or x[1]]), 0, cosine_dist
     else:
         scale_factor = sum([x[0] for x in match_pairs]) / sum([x[1] for x in match_pairs])
 
         diffs = [x[0] / (x[1]*scale_factor) for x in match_pairs]
         
-        return abs(np.mean(diffs)-1), len(diffs)
+        return abs(np.mean(diffs)-1), len(diffs), cosine_dist
 
 
 # TODO: specific NCE and instrument setting?
@@ -392,9 +343,10 @@ def get_frag_pred_deltas(psms, data, nce, instrument, model_path = PEPTDEEP_MODE
     frag_errors = psms.apply(axis=1, func=lambda x: calculate_fragment_error(data, preds, x, ppm_tol=20))
     psms['fragment_error'] = [x[0] for x in frag_errors]
     psms['matched_frags'] = [x[1] for x in frag_errors]
+    psms['fragment_cosine_dist'] = [x[2] for x in frag_errors]
 
 
-    return psms[['fragment_error', 'matched_frags']]
+    return psms[['fragment_error', 'matched_frags', 'fragment_cosine_dist']]
 
 
 def get_isotopic_envelope_delta(psms, data):
@@ -445,21 +397,23 @@ def get_isotopic_envelope_delta(psms, data):
 
 import time
 def annotate_pin_file(psmfile, rawfile, featurefile, outputfile, coll_e = 32, instrument_name = 'Elite'):
-    testout = open(os.path.join(os.path.dirname(outputfile), 'testout.txt'), 'w')
-    testout.write(f"Starting annotation, time: {time.time()}\n")
+    # testout = open(os.path.join(os.path.dirname(outputfile), 'testout.txt'), 'w')
+    # testout.write(f"Starting annotation, time: {time.time()}\n")
     data = mzFile(rawfile) 
     psms = pd.read_csv(psmfile)
 
     # print("TEST MODE")
     # psms = psms.iloc[:100]
     
-    testout.write(f"Loaded data, time: {time.time()}\n")
+    # testout.write(f"Loaded data, time: {time.time()}\n")
 
-     # TODO replace this with numbers from the TMT file?
-    mz_rt_lookup = {x[2]:(x[0], x[1]) for x in data.scan_info()} # type: ignore
-    # psms[['rt', 'mz']] = psms.scannr.apply(lambda x: mz_rt_lookup[x])
-    psms['rt'] = psms.scannr.apply(lambda x: mz_rt_lookup[x][0])
-    psms['mz'] = psms.scannr.apply(lambda x: mz_rt_lookup[x][1])
+    #  # TODO replace this with numbers from the TMT file?
+    # mz_rt_lookup = {x[2]:(x[0], x[1]) for x in data.scan_info()} # type: ignore
+    # # psms[['rt', 'mz']] = psms.scannr.apply(lambda x: mz_rt_lookup[x])
+    # psms['rt'] = psms.scannr.apply(lambda x: mz_rt_lookup[x][0])
+    # psms['mz'] = psms.scannr.apply(lambda x: mz_rt_lookup[x][1])
+    mz_rt_table = pd.DataFrame([(x[2], x[0], x[1]) for x in data.scan_info()], columns=['scannr', 'rt', 'mz']) # type: ignore
+    psms = psms.merge(mz_rt_table, on='scannr', how='left')
 
     psms = annotate_with_feature_info(psms, featurefile)
 
@@ -472,21 +426,28 @@ def annotate_pin_file(psmfile, rawfile, featurefile, outputfile, coll_e = 32, in
 
     peptide_table = psms.sort_values('feature_apex_int', ascending=False).drop_duplicates(['peptide', 'rec_mods']).copy()
 
-    # TODO multiprocessing/multithreading?
-    # psms[['rt', 'rt_error', 'abs_rt_error']] = get_rt_pred_deltas(psms.copy())
-    # psms[['fragment_error', 'matched_fragments']] = get_frag_pred_deltas(psms.copy(), data, nce=coll_e, instrument=instrument_name)
-    # psms['isotope_ratio_error'] = get_isotopic_envelope_delta(psms.copy(), data)
+    feature_table = peptide_table[['peptide', 'rec_mods']].copy()
 
-    peptide_table[['rt', 'rt_error', 'abs_rt_error']] = get_rt_pred_deltas(peptide_table.copy())
-    peptide_table[['fragment_error', 'matched_fragments']] = get_frag_pred_deltas(peptide_table.copy(), data, nce=coll_e, instrument=instrument_name)
-    peptide_table['isotope_ratio_error'] = get_isotopic_envelope_delta(peptide_table.copy(), data)
+    feature_table[['rt', 'rt_error', 'abs_rt_error']] = get_rt_pred_deltas(peptide_table.copy())
+    feature_table[['fragment_error', 'matched_fragments', 'fragment_cosine_dist']] = get_frag_pred_deltas(peptide_table.copy(), data, nce=coll_e, instrument=instrument_name)
+    feature_table['isotope_ratio_error'] = get_isotopic_envelope_delta(peptide_table.copy(), data)
 
-    psms = psms.merge(peptide_table[['peptide', 'rec_mods', 'rt_error', 'abs_rt_error', 'fragment_error', 'matched_fragments', 'isotope_ratio_error']],
-                      on=['peptide', 'rec_mods'], how='left')
+    psms = psms.merge(feature_table, on=['peptide', 'rec_mods'], how='left')
+    
+    # Have to merge the peptide and mods, since Mokapot doesn't allow for a separate mods column
+    def _render_modpep(row):
+        pep = list(row['peptide'])
+        mods = row['rec_mods']
+        mods = [x.split('_') for x in mods.split(',')]
+        mods = [(int(x[0]), x[1]) for x in mods]
+        for pos, mass in sorted(mods, reverse=True):
+            pep.insert(pos, f'[{mass}]')
+        return ''.join(pep)
 
+    psms['peptide'] = psms.apply(axis=1, func=_render_modpep) 
     psms.drop('rec_mods', axis = 1, inplace = True)
 
-    # Rrebuild specid since mokapot will expect it.
+    # Rebuild specid since mokapot will expect it.
     psms['specid'] = psms.apply(axis=1, func=lambda x: '%s_%s' % (x['filename'], x['scannr']))
 
     psms.to_csv(outputfile, sep='\t', index=False)
@@ -495,30 +456,30 @@ def annotate_pin_file(psmfile, rawfile, featurefile, outputfile, coll_e = 32, in
     print("Annotated PSMs written to %s" % outputfile)
     return outputfile
 
-def test_feature_thing(psmfile, rawfile, featurefile, etc):
-    data = mzFile(rawfile) 
-    psms = pd.read_csv(psmfile)
+# def test_feature_thing(psmfile, rawfile, featurefile, etc):
+#     data = mzFile(rawfile) 
+#     psms = pd.read_csv(psmfile)
 
-    # print("TEST MODE")
-    # psms = psms.iloc[:100]
-    
+#     # print("TEST MODE")
+#     # psms = psms.iloc[:100]
+#     
 
-     # TODO replace this with numbers from the TMT file?
-    mz_rt_lookup = {x[2]:(x[0], x[1]) for x in data.scan_info()} # type: ignore
-    # psms[['rt', 'mz']] = psms.scannr.apply(lambda x: mz_rt_lookup[x])
-    psms['rt'] = psms.scannr.apply(lambda x: mz_rt_lookup[x][0])
-    psms['mz'] = psms.scannr.apply(lambda x: mz_rt_lookup[x][1])
+#      # TODO replace this with numbers from the TMT file?
+#     mz_rt_lookup = {x[2]:(x[0], x[1]) for x in data.scan_info()} # type: ignore
+#     # psms[['rt', 'mz']] = psms.scannr.apply(lambda x: mz_rt_lookup[x])
+#     psms['rt'] = psms.scannr.apply(lambda x: mz_rt_lookup[x][0])
+#     psms['mz'] = psms.scannr.apply(lambda x: mz_rt_lookup[x][1])
 
-    start = (time.time())
-    bar = new_annotate_with_feature_info(psms.copy(), featurefile)
-    print("Elapsed time: ", time.time()-start)
-    start = (time.time())
-    foo = annotate_with_feature_info(psms.copy(), featurefile)
-    print("Elapsed time: ", time.time()-start)
+#     start = (time.time())
+#     bar = new_annotate_with_feature_info(psms.copy(), featurefile)
+#     print("Elapsed time: ", time.time()-start)
+#     start = (time.time())
+#     foo = annotate_with_feature_info(psms.copy(), featurefile)
+#     print("Elapsed time: ", time.time()-start)
 
-    print(bar.equals(foo))
-    foo.to_csv(etc + '.old.csv', sep='\t', index=True)
-    bar.to_csv(etc + '.new.csv', sep='\t', index=True)
+#     print(bar.equals(foo))
+#     foo.to_csv(etc + '.old.csv', sep='\t', index=True)
+#     bar.to_csv(etc + '.new.csv', sep='\t', index=True)
 
 
 if __name__ == "__main__":
@@ -532,8 +493,13 @@ if __name__ == "__main__":
     parser.add_argument('--instrument_name', default = 'Elite')
     args = parser.parse_args()
 
+    mon_obj = start_monitor(args.output + '.resource_monitoring.txt')
 
-    # import cProfile
-    # cProfile.run('annotate_pin_file(args.pin, args.raw, args.features, args.output)#, args.coll_e, args.instrument_name)', '/data/annotate_psms_via_models.prof')
+    import cProfile
+    cProfile.run('annotate_pin_file(args.pin, args.raw, args.features, args.output)#, args.coll_e, args.instrument_name)', '/data/annotate_psms_via_models.improved.prof')
+    # start_time = time.time()
     # annotate_pin_file(args.pin, args.raw, args.features, args.output)
-    test_feature_thing(args.pin, args.raw, args.features, args.output)
+    # print("Elapsed time: ", time.time()-start_time)
+    # test_feature_thing(args.pin, args.raw, args.features, args.output)
+
+    stop_monitor(mon_obj)

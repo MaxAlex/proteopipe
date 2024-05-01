@@ -7,4 +7,4 @@ RUN unzip awscliv2.zip
 RUN ./aws/install
 
 
-RUN curl "https://github.com/fickludd/dinosaur/releases/download/1.2.0/Dinosaur-1.2.0.free.jar" -o "Dinosaur-1.2.1.free.jar"
+RUN curl -L "https://github.com/fickludd/dinosaur/releases/download/1.2.0/Dinosaur-1.2.0.free.jar" -o "Dinosaur-1.2.1.free.jar"

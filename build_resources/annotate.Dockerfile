@@ -12,7 +12,7 @@ RUN apt install -y mono-devel=6.12\*
 RUN pip install pycparser \
   && pip install pythonnet==3.0.1
 
-RUN apt install -y curl unzip
+RUN apt install -y curl unzip git
 RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
 RUN unzip awscliv2.zip
 RUN ./aws/install
@@ -23,13 +23,14 @@ RUN python -m pip install pyteomics
 
 RUN rm -rf /var/lib/apt/lists/* /tmp/*
 
-RUN git clone https://github.com/BlaisProteomics/multiplierz.git --branch patches
-RUN python -m pip install -e multiplierz
+RUN python -m pip install multiplierz
 
-RUN python -m pip install peptdeep
+# RUN python -m pip install peptdeep==1.1.2
+RUN git clone https://github.com/MaxAlex/alphapeptdeep.git
+RUN cd alphapeptdeep && python -m pip install . && cd ..
 
-# COPY peptdeep_generic_models.tar.gz /
-# RUN tar -xvf peptdeep_generic_models.tar.gz
+RUN curl -L "https://github.com/MannLabs/alphapeptdeep/releases/download/pre-trained-models/pretrained_models.zip" -o "pretrained_models.zip"
+RUN unzip pretrained_models.zip
 RUN python -c "from peptdeep.model.ms2 import pDeepModel"  # Causes models to be downloaded, if they weren't
 
 RUN python -m pip install mokapot==0.9.1 intervaltree
@@ -38,3 +39,4 @@ COPY annotate_psms_via_models.py /
 COPY mod_mass.py /
 COPY run_mokapot.py /
 COPY call_pipeline_func.py /
+COPY resource_mon.py /

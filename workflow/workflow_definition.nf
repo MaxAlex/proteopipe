@@ -1,11 +1,5 @@
 
 
-///////////////////////////////
-// THIS IS THE AWS COPY      //
-///////////////////////////////
-
-
-
 params.log_file = "nextflow_process_log.txt"
 params.pipe_script = "/call_pipeline_func.py"
 
@@ -74,7 +68,7 @@ process run_sage {
 }
 
 
-process run_sage_2 {
+process run_sage_wide {
     label 'sageSearch'
 
     memory '32 GB'
@@ -171,27 +165,22 @@ process reconcile_search_results {
     """
 }
 
-
-///////////////////////////////
-// THIS IS THE AWS COPY      //
-///////////////////////////////
-
-
 process annotate_psm_file {
     label 'annotateImage'
 
     memory '16 GB'
-    cpus 8  // Still doing CPU-based model running!  Erg.
+    cpus 2  
 
     input:
     tuple(val(join_key), path(raw_file), path(psm_file), path(dino_file))
 
     output:
     path("${psm_file.baseName}.annotated.pin")
+    path("${psm_file.baseName}.annotated.pin.resource_monitoring.txt")
 
     script:
     """
-    python /annotate_psms_via_models.py ${psm_file} ${raw_file} ${dino_file}
+    python /annotate_psms_via_models.py ${psm_file} ${raw_file} ${dino_file} ${psm_file.baseName}.annotated.pin
     """
 }
 
@@ -199,20 +188,22 @@ process annotate_psm_file {
 process concatenate_and_mokapot {
     label 'annotateImage'
 
-    memory '6 GB'
+    memory '16 GB'
     cpus 4
 
     input:
     path file_list
+    path fasta_file
 
     output:
     path 'concatenated.pin'
     path 'mokapot.psms.txt'
     path 'mokapot.peptides.txt'
+    path 'mokapot.proteins.txt'
 
     script:
     """
-    python /run_mokapot.py --psm ${file_list.join(' ')}
+    python /run_mokapot.py --fasta ${fasta_file} --psm ${file_list.join(' ')}
     """
 }
 
@@ -252,63 +243,6 @@ process dinosaur_annotate {
     script:
     """
     python /dinosaur_quantitation.py --psm ${psm_file} --data ${dino_file_list.join(' ')}
-    """
-}
-
-process OLD_generate_isobaric_input {
-    label 'postprocessImage'
-    
-    memory '6 GB'
-    cpus 1
-
-    input:
-    tuple(path(psm_file), path(raw_file), val(mzml_file))
-  
-
-    output:
-    tuple(val(mzml_file), path("${psm_file.baseName}.isobaricquant_in.csv"))
-
-    script:
-    """
-    python /isobaricquant_format.py --function generate_input --psm ${psm_file} --raw ${raw_file}
-    """
-}
-
-process OLD_run_isobaricquant {
-    label 'javaImage'
-
-    memory '12 GB'
-    cpus 4
-
-    input:
-    tuple(path(mzml_file), path(hits_file))
-    path(isobaricquant_parameters)
-
-    output:
-    path("${mzml_file.baseName}isolab.csv")
-
-    script:
-    """
-    java -jar /IsobaricQuant_LINUX.jar -c ${isobaricquant_parameters} -mzf ${mzml_file} -hits ${hits_file} -o ${mzml_file.baseName} 
-    """
-}
-
-process OLD_compile_isobaric_data {
-    label 'postprocessImage'
-
-    memory '6 GB'
-    cpus 1
-
-    input:
-    path psm_file
-    path isobaric_outputs
-
-    output:
-    path("${psm_file}.w_isobaric.csv")
-
-    script:
-    """
-    python /isobaricquant_format.py --function compile --psm ${psm_file} --quant ${isobaric_outputs.join(' ')}
     """
 }
 
@@ -355,11 +289,12 @@ process peptide_protein_aggregation {
     memory '12 GB'
     cpus 2
 
-    publishDir '${params.run_name}'
+    publishDir params.run_name
 
     input:
     path psm_file
     path mokapot_peptides
+    path mokapot_proteins
 
     output:
     path("${psm_file}.peptides.csv")
@@ -367,9 +302,10 @@ process peptide_protein_aggregation {
 
     script:
     """
-    python /peptide_protein_aggregation.py --psm ${psm_file} --mokapot ${mokapot_peptides} --run_parse_regexp "${params.run_parse_regexp}"
+    python /peptide_protein_aggregation.py --psm ${psm_file} --mokapot ${mokapot_peptides} --mokapot_prots ${mokapot_proteins} --run_parse_regexp "${params.run_parse_regexp}"
     """
 }
+
 
 workflow {
     params.comet_varmods
@@ -380,11 +316,11 @@ workflow {
     params.data_glob
 
     rawfiles = Channel.fromPath(params.data_glob)
-   
+  
+    // TESTING
     rawfiles = rawfiles.take(2)
   
     rawfiles = rawfiles.multiMap{it -> to_comet: to_sage: it}
-
 
     mgf_out = extract_mgf(rawfiles.to_comet)
     comet_out = run_comet(mgf_out, params.fasta_file, params.comet_parameters, params.comet_varmods)
@@ -392,27 +328,18 @@ workflow {
     mzml_out = extract_mzml(rawfiles.to_sage)
     mzml_out = mzml_out.multiMap{it -> to_sage: to_isobar: to_dinosaur: to_widesage: it}
     sage_out = run_sage(mzml_out.to_sage, params.fasta_file, params.sage_parameters)
-    widesage_out = run_sage_2(mzml_out.to_widesage, params.fasta_file, params.sage_widewindow_parameters)
+    widesage_out = run_sage_wide(mzml_out.to_widesage, params.fasta_file, params.sage_widewindow_parameters)
 
     dino_out = run_dinosaur(mzml_out.to_dinosaur)
-
-    // comet_out.view()
-    // sage_out.view()
-    // dino_out.view()
 
     full_search_out = comet_out.join(sage_out).join(widesage_out)
     reconciled_out = reconcile_search_results(full_search_out)
 
-    annotated_out = annotate_psm_file(reconciled_out.join(dino_out))
-    (concat_pin, moka_psms, moka_peps) = concatenate_and_mokapot(annotated_out.collect())
+    (annotated_out, etc) = annotate_psm_file(reconciled_out.join(dino_out))
+    (concat_pin, moka_psms, moka_peps, moka_prots) = concatenate_and_mokapot(annotated_out.collect(), params.fasta_file)
     psm_report = generate_psm_output(concat_pin, moka_psms)
 
     w_ms1_features = dinosaur_annotate(psm_report, dino_out.map( x -> x[1] ).collect())
-
-
-    // isobar_input_data = w_ms1_features.combine(mzml_out.to_isobar)
-    // isobar_tables = generate_isobaric_input(isobar_input_data)
-    // isobar_result = run_isobaricquant(isobar_tables, params.isobaricquant_parameters)
 
     if (params.isobaric_type == 0) {
       w_isobar_quant = w_ms1_features
@@ -422,11 +349,7 @@ workflow {
       w_isobar_quant = integrate_isobaric_data(w_ms1_features, isobar_data.collect())
     }
 
-    (peptide_agg, protein_agg) = peptide_protein_aggregation(w_isobar_quant, moka_peps)
+    (peptide_agg, protein_agg) = peptide_protein_aggregation(w_isobar_quant, moka_peps, moka_prots)
 }
 
 
-
-///////////////////////////////
-// THIS IS THE AWS COPY      //
-///////////////////////////////

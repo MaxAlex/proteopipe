@@ -10,7 +10,7 @@ RUN python -m pip install pandas scikit-learn numpy mokapot==0.9.1 intervaltree 
 COPY run_mokapot.py /
 COPY mod_mass.py /
 COPY dinosaur_quantitation.py /
-COPY comet.params.new /
+COPY utilities/comet.params.new /
 COPY comet_search.py /
 COPY call_pipeline_func.py /
 COPY generate_final_report.py /

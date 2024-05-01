@@ -1,6 +1,8 @@
 #!/bin/bash
 
 set -e
+pushd ../build_resources
+
 
 # Ensure that docker is logged into the AWS ECR
 aws ecr get-login-password --region {AWS_REGION} | docker login --username AWS --password-stdin {ECR_URL}.{AWS_REGION}.amazonaws.com &&
@@ -42,7 +44,9 @@ popd
 # Proteowizard 
 pushd proteowizard
 docker build -t pwiz . &&
-docker tag proteowizard {ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:pwiz &&
+docker tag pwiz {ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:pwiz &&
 docker push {ECR_URL}.{AWS_REGION}.amazonaws.com/{ECR_REPO_NAME}:pwiz
+popd
+
 popd
 
