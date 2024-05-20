@@ -152,6 +152,7 @@ process reconcile_search_results {
 
     memory '6 GB'
     cpus 1
+    disk '30 GB'
 
     input:
     tuple(val(join_key), path(pin_file), path(txt_file), val(raw_file), path(sage_file), val(raw_file_2), path(widesage_file)) 
@@ -168,7 +169,7 @@ process reconcile_search_results {
 process annotate_psm_file {
     label 'annotateImage'
 
-    memory '16 GB'
+    memory '32 GB'
     cpus 2  
 
     input:
@@ -188,8 +189,9 @@ process annotate_psm_file {
 process concatenate_and_mokapot {
     label 'annotateImage'
 
-    memory '16 GB'
+    memory '64 GB'
     cpus 4
+    disk '1000 GB'
 
     input:
     path file_list
@@ -210,7 +212,8 @@ process concatenate_and_mokapot {
 process generate_psm_output {
     label 'postprocessImage'
 
-    memory '4 GB'
+    time '1h'
+    memory '16 GB'
     cpus 2
 
     input:
@@ -227,7 +230,7 @@ process generate_psm_output {
     """
 }
 
-process dinosaur_annotate {
+process OLD_dinosaur_annotate {
     label 'postprocessImage'
 
     memory '6 GB'
@@ -317,9 +320,6 @@ workflow {
 
     rawfiles = Channel.fromPath(params.data_glob)
   
-    // TESTING
-    rawfiles = rawfiles.take(2)
-  
     rawfiles = rawfiles.multiMap{it -> to_comet: to_sage: it}
 
     mgf_out = extract_mgf(rawfiles.to_comet)
@@ -339,14 +339,12 @@ workflow {
     (concat_pin, moka_psms, moka_peps, moka_prots) = concatenate_and_mokapot(annotated_out.collect(), params.fasta_file)
     psm_report = generate_psm_output(concat_pin, moka_psms)
 
-    w_ms1_features = dinosaur_annotate(psm_report, dino_out.map( x -> x[1] ).collect())
-
     if (params.isobaric_type == 0) {
-      w_isobar_quant = w_ms1_features
+      w_isobar_quant = psm_report 
     }
     else {
       isobar_data = extract_isobaric_values(mzml_out.to_isobar)
-      w_isobar_quant = integrate_isobaric_data(w_ms1_features, isobar_data.collect())
+      w_isobar_quant = integrate_isobaric_data(psm_report, isobar_data.collect())
     }
 
     (peptide_agg, protein_agg) = peptide_protein_aggregation(w_isobar_quant, moka_peps, moka_prots)

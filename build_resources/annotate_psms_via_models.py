@@ -3,10 +3,17 @@ from collections import defaultdict
 import intervaltree as itree
 import pandas as pd
 import numpy as np
+import pickle
+
+import logging
+logging.basicConfig(level=logging.ERROR)
+
 from mod_mass import identify_mod_by_mass
 from resource_mon import start_monitor, stop_monitor 
+from mp_util import ReturningProcess
 
 from deeplc import DeepLC
+
 
 
 
@@ -114,8 +121,17 @@ MASS_TO_MOD = {
         }
 
 # TODO it seems like deepLC silently throws away 0-indexed mods????? WTF?
-def get_rt_pred_deltas(psms, calibration_size = 9000):
-        
+def get_rt_pred_deltas(psms, featurefile, calibration_size = 9000):
+    psms = annotate_with_feature_info(psms, featurefile)
+
+    # Basic imputation to make mokapot work better?  TODO check if taking median is better?
+    psms['feature_apex_int'] = psms['feature_apex_int'].fillna(psms['feature_apex_int'].min())
+    psms['feature_total_int'] = psms['feature_total_int'].fillna(psms['feature_total_int'].min())
+    psms['feature_run_length'] = psms['feature_RT_end'] - psms['feature_RT_start']
+    psms['feature_run_length'] = psms['feature_run_length'].fillna(psms['feature_run_length'].min())
+
+
+
     def render_deeplc_mod(mod):
         if mod=='-' or pd.isnull(mod):
             return ''
@@ -133,7 +149,7 @@ def get_rt_pred_deltas(psms, calibration_size = 9000):
             if len([x for x in loc_mods if int(x[0])==0]) > 1:
                 extra_zero_mods = sorted([x for x in loc_mods if int(x[0])==0], key=lambda x: float(x[1]))[:-1]
                 loc_mods = [x for x in loc_mods if x not in extra_zero_mods]
-            loc_mods = [(loc if int(loc) else '1', mod) for loc, mod in loc_mods]
+            loc_mods = [(loc if int(loc) else '0', mod) for loc, mod in loc_mods]
 
             loc_mods = [(loc, MASS_TO_MOD[int(float(mod))]) for loc, mod in loc_mods]
 
@@ -168,7 +184,9 @@ def get_rt_pred_deltas(psms, calibration_size = 9000):
 
     assert(not any(psms['abs_rt_error'].isna()))
 
-    return psms[['rt', 'rt_error', 'abs_rt_error']]
+    # return psms[['rt', 'rt_error', 'abs_rt_error']]
+    return psms[['feature_id', 'feature_RT_start','feature_RT_end', 'feature_RT_apex',
+                 'feature_total_int', 'feature_apex_int', 'feature_mz', 'rt', 'rt_error', 'abs_rt_error']]
 
 
 def get_cosine_distance(X_pts, Y_pts, vec_length=1500):
@@ -184,17 +202,21 @@ def get_cosine_distance(X_pts, Y_pts, vec_length=1500):
             continue
         Y[int(mz)] = i
 
-    return np.dot(X, Y) / (np.linalg.norm(X) * np.linalg.norm(Y))
+    dist = np.dot(X, Y) / (np.linalg.norm(X) * np.linalg.norm(Y))
+    # assert(not np.isnan(dist)), (dist, np.linalg.norm(X), np.linalg.norm(Y))
+    if np.isnan(dist):
+        return -0.5
+    else:
+        return dist
 
 
-def calculate_fragment_error(data, pred_lookup, txt_item, ppm_tol=200):
+def calculate_fragment_error(pred_lookup, txt_item, ppm_tol=200):
     seq = txt_item['peptide']
-    nice_mods = txt_item['alphapept_mods']
     mods = txt_item['rec_mods']
     charge = txt_item['charge']
-    scannum = txt_item['scannr']
+    scan_data = txt_item['ms2_data']
 
-    raw_scan = data.scan(scannum, centroid=True)
+    raw_scan = pickle.loads(scan_data)
     scan = ProxSeq(raw_scan, lambda x: x[0])
 
     pred_info = pred_lookup[seq, mods if mods!='' else np.nan, charge]
@@ -243,7 +265,7 @@ def calculate_fragment_error(data, pred_lookup, txt_item, ppm_tol=200):
 
 
 # TODO: specific NCE and instrument setting?
-def get_frag_pred_deltas(psms, data, nce, instrument, model_path = PEPTDEEP_MODEL_PATH,
+def get_frag_pred_deltas(psms, nce, instrument, model_path = PEPTDEEP_MODEL_PATH,
                          prediction_batch_size = 100000):
     def render_alphapept_mod(mod, pep):
         if mod=='-' or pd.isnull(mod):
@@ -340,7 +362,7 @@ def get_frag_pred_deltas(psms, data, nce, instrument, model_path = PEPTDEEP_MODE
     peptide_list = list(psms[['peptide', 'name_placeholder', 'rec_mods', 'charge']]
                         .itertuples(index=False, name=None))
     preds = _predict_for_specific(peptide_list, fragmodel)
-    frag_errors = psms.apply(axis=1, func=lambda x: calculate_fragment_error(data, preds, x, ppm_tol=20))
+    frag_errors = psms.apply(axis=1, func=lambda x: calculate_fragment_error(preds, x, ppm_tol=20))
     psms['fragment_error'] = [x[0] for x in frag_errors]
     psms['matched_frags'] = [x[1] for x in frag_errors]
     psms['fragment_cosine_dist'] = [x[2] for x in frag_errors]
@@ -349,13 +371,8 @@ def get_frag_pred_deltas(psms, data, nce, instrument, model_path = PEPTDEEP_MODE
     return psms[['fragment_error', 'matched_frags', 'fragment_cosine_dist']]
 
 
-def get_isotopic_envelope_delta(psms, data):
 
-    def _expected_ratio_for_peptide(peptide):
-        ratios = forPeptide(peptide.replace('U', 'S'))
-        return ratios[0]/ratios[1]
-
-
+def get_ms1_envelope_data(data):
     ms2s_for_ms1 = {}
     agg = []
     for info in data.scan_info():
@@ -383,6 +400,13 @@ def get_isotopic_envelope_delta(psms, data):
                     obs_ratio = np.nan
                 precursor_ratios.append((num, obs_ratio))
     precursor_iso_by_scan = dict(precursor_ratios)
+    return precursor_iso_by_scan
+
+
+def get_isotopic_envelope_delta(psms, precursor_iso_by_scan, ppm_tol=20):
+    def _expected_ratio_for_peptide(peptide):
+        ratios = forPeptide(peptide.replace('U', 'S'))
+        return ratios[0]/ratios[1]
 
     psms['expected_isotope_ratio'] = psms.apply(axis=1,
                                                func=lambda x: _expected_ratio_for_peptide(x['peptide']))
@@ -395,7 +419,9 @@ def get_isotopic_envelope_delta(psms, data):
 
     return psms['isotope_ratio_error']
 
+
 import time
+import multiprocessing as mp 
 def annotate_pin_file(psmfile, rawfile, featurefile, outputfile, coll_e = 32, instrument_name = 'Elite'):
     # testout = open(os.path.join(os.path.dirname(outputfile), 'testout.txt'), 'w')
     # testout.write(f"Starting annotation, time: {time.time()}\n")
@@ -406,33 +432,36 @@ def annotate_pin_file(psmfile, rawfile, featurefile, outputfile, coll_e = 32, in
     # psms = psms.iloc[:100]
     
     # testout.write(f"Loaded data, time: {time.time()}\n")
-
-    #  # TODO replace this with numbers from the TMT file?
-    # mz_rt_lookup = {x[2]:(x[0], x[1]) for x in data.scan_info()} # type: ignore
-    # # psms[['rt', 'mz']] = psms.scannr.apply(lambda x: mz_rt_lookup[x])
-    # psms['rt'] = psms.scannr.apply(lambda x: mz_rt_lookup[x][0])
-    # psms['mz'] = psms.scannr.apply(lambda x: mz_rt_lookup[x][1])
     mz_rt_table = pd.DataFrame([(x[2], x[0], x[1]) for x in data.scan_info()], columns=['scannr', 'rt', 'mz']) # type: ignore
     psms = psms.merge(mz_rt_table, on='scannr', how='left')
 
-    psms = annotate_with_feature_info(psms, featurefile)
 
-    # Basic imputation to make mokapot work better?  TODO check if taking median is better?
-    psms['feature_apex_int'] = psms['feature_apex_int'].fillna(psms['feature_apex_int'].min())
-    psms['feature_total_int'] = psms['feature_total_int'].fillna(psms['feature_total_int'].min())
-    psms['feature_run_length'] = psms['feature_RT_end'] - psms['feature_RT_start']
-    psms['feature_run_length'] = psms['feature_run_length'].fillna(psms['feature_run_length'].min())
+    # peptide_table = psms.sort_values('feature_apex_int', ascending=False).drop_duplicates(['peptide', 'rec_mods']).copy()
 
 
-    peptide_table = psms.sort_values('feature_apex_int', ascending=False).drop_duplicates(['peptide', 'rec_mods']).copy()
+    psms['ms2_data'] = psms.scannr.apply(lambda x: pickle.dumps(data.scan(x, centroid=True))) # type: ignore
+    frag_pred_proc = ReturningProcess(target=get_frag_pred_deltas, args=(psms.copy(), coll_e, instrument_name))
+    frag_pred_proc.start()
+    psms.drop('ms2_data', axis=1, inplace=True)
 
-    feature_table = peptide_table[['peptide', 'rec_mods']].copy()
+    # feature_table[['rt', 'rt_error', 'abs_rt_error']] = get_rt_pred_deltas(peptide_table.copy())
+    # feature_table[['fragment_error', 'matched_fragments', 'fragment_cosine_dist']] = get_frag_pred_deltas(peptide_table.copy(), data, nce=coll_e, instrument=instrument_name)
+    # feature_table['isotope_ratio_error'] = get_isotopic_envelope_delta(peptide_table.copy(), data)
 
-    feature_table[['rt', 'rt_error', 'abs_rt_error']] = get_rt_pred_deltas(peptide_table.copy())
-    feature_table[['fragment_error', 'matched_fragments', 'fragment_cosine_dist']] = get_frag_pred_deltas(peptide_table.copy(), data, nce=coll_e, instrument=instrument_name)
-    feature_table['isotope_ratio_error'] = get_isotopic_envelope_delta(peptide_table.copy(), data)
+    precursor_iso_by_scan = get_ms1_envelope_data(data)
+    iso_pred_proc = ReturningProcess(target=get_isotopic_envelope_delta, args=(psms.copy(), precursor_iso_by_scan))
+    iso_pred_proc.start()
 
-    psms = psms.merge(feature_table, on=['peptide', 'rec_mods'], how='left')
+    # rt_pred_proc = ReturningProcess(target=get_rt_pred_deltas, args=(psms.copy(), featurefile, coll_e))
+    # rt_pred_proc.start()
+    psms[['feature_id', 'feature_RT_start','feature_RT_end', 'feature_RT_apex',
+           'feature_total_int', 'feature_apex_int', 'feature_mz', 'rt', 'rt_error', 'abs_rt_error']] = get_rt_pred_deltas(psms.copy(), featurefile)
+    
+
+    psms[['fragment_error', 'matched_fragments', 'fragment_cosine_dist']] = frag_pred_proc.resolve()
+    psms['isotope_ratio_error'] = iso_pred_proc.resolve()
+    # psms[['feature_id', 'feature_RT_start','feature_RT_end', 'feature_RT_apex',
+    #       'feature_total_int', 'feature_apex_int', 'feature_mz', 'rt', 'rt_error', 'abs_rt_error']] = rt_pred_proc.resolve()
     
     # Have to merge the peptide and mods, since Mokapot doesn't allow for a separate mods column
     def _render_modpep(row):
@@ -495,11 +524,12 @@ if __name__ == "__main__":
 
     mon_obj = start_monitor(args.output + '.resource_monitoring.txt')
 
-    import cProfile
-    cProfile.run('annotate_pin_file(args.pin, args.raw, args.features, args.output)#, args.coll_e, args.instrument_name)', '/data/annotate_psms_via_models.improved.prof')
-    # start_time = time.time()
-    # annotate_pin_file(args.pin, args.raw, args.features, args.output)
-    # print("Elapsed time: ", time.time()-start_time)
+    # import cProfile
+    # cProfile.run('annotate_pin_file(args.pin, args.raw, args.features, args.output)#, args.coll_e, args.instrument_name)', '/data/annotate_psms_via_models.improved.prof')
+    start_time = time.time()
+    annotate_pin_file(args.pin, args.raw, args.features, args.output)
+    print("Elapsed time: ", time.time()-start_time)
     # test_feature_thing(args.pin, args.raw, args.features, args.output)
 
     stop_monitor(mon_obj)
+

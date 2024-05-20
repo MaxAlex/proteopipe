@@ -35,6 +35,7 @@ RUN python -c "from peptdeep.model.ms2 import pDeepModel"  # Causes models to be
 
 RUN python -m pip install mokapot==0.9.1 intervaltree
 
+COPY mp_util.py /
 COPY annotate_psms_via_models.py /
 COPY mod_mass.py /
 COPY run_mokapot.py /

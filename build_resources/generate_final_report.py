@@ -38,10 +38,11 @@ def render_nice_peptide_string(peptide):
 
 
 COLUMN_ORDER = ['Spectrum_ID', 'Filename', 'Scan', 'Peptide', 'Modifications', 'ModifiedPeptide', 'Charge', 'M/Z',
-                'Calculated Mass', 'Experimental Mass', 'Retention Time', 'dMass', 
+                'Calculated Mass', 'Experimental Mass', 'Retention Time', 'Delta Mass', 
                 'Search Engine', 'Mokapot q-value', 'Mokapot score', 'Mokapot PEP',
                 'RT Prediction Error', 'Fragmentation Prediction Error', 'Fragment Match Count', 'Isotope Profile Error',
-                'Proteins']
+                'Proteins', 'Feature ID', 'Feature RT Start', 'Feature RT End', 'Feature RT Apex', 'Feature Total Int', 
+                'Feature Apex Int', 'Feature MZ']
 
 def generate_PSM_report(pin_file, mokapot_psm_file):
     pin = pd.read_csv(pin_file, sep='\t')
@@ -103,6 +104,13 @@ def generate_PSM_report(pin_file, mokapot_psm_file):
                    'Fragment Match Count': row['res_matched_fragments'],
                    'Isotope Profile Error': row['res_isotope_ratio_error'],
                    'Proteins': row['res_proteins'],
+                   'Feature ID': row['res_feature_id'],
+                   'Feature RT Start': row['res_feature_RT_start'],
+                   'Feature RT End': row['res_feature_RT_end'],
+                   'Feature RT Apex': row['res_feature_RT_apex'],
+                   'Feature Total Int': row['res_feature_total_int'],
+                   'Feature Apex Int': row['res_feature_apex_int'],
+                   'Feature MZ': row['res_feature_mz']
                    }
         
         new_rows.append(new_row)
